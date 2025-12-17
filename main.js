@@ -11,7 +11,8 @@ import {
   viewportSharedTexture,
   linearDepth,
   pass,
-  vec2
+  vec2,
+  vec3
 } from 'three/tsl'
 import { gaussianBlur } from 'three/examples/jsm/tsl/display/GaussianBlurNode.js'
 import WebGPU from 'three/addons/capabilities/WebGPU.js'
@@ -36,8 +37,39 @@ const init = async () => {
 
   // Crear escena
   scene = new THREE.Scene()
-  scene.fog = new THREE.Fog(0x0487e2, 7, 25)
-  scene.backgroundNode = normalWorld.y.mix(color(0x0487e2), color(0x0066ff))
+  scene.fog = new THREE.Fog(0xff9966, 7, 25) // Niebla color atardecer
+
+  // Cielo procedural de atardecer con nubes
+  const skyDirection = normalWorld.normalize()
+  const sunsetHorizon = skyDirection.y.add(0.1).saturate()
+
+  // Colores del atardecer
+  const skyTop = color(0x0033aa) // Azul oscuro arriba
+  const skyHorizon = color(0xff6b35) // Naranja intenso horizonte
+  const skyBottom = color(0xffaa66) // Naranja claro abajo
+
+  // Gradiente base del cielo
+  const skyGradient = sunsetHorizon
+    .greaterThan(0.5)
+    .select(
+      skyTop.mix(skyHorizon, sunsetHorizon.sub(0.5).mul(2)),
+      skyBottom.mix(skyHorizon, sunsetHorizon.mul(2))
+    )
+
+  // Nubes procedurales en movimiento
+  const cloudTime = time.mul(0.05)
+  const cloudUV = vec3(
+    skyDirection.x.mul(3).add(cloudTime),
+    skyDirection.y.mul(2),
+    skyDirection.z.mul(3)
+  )
+
+  const clouds = mx_worley_noise_float(cloudUV).oneMinus()
+  const cloudMask = clouds.pow(3).mul(0.6) // Nubes suaves
+
+  // Mezclar cielo con nubes
+  const cloudColor = color(0xffddbb) // Color cálido de nubes al atardecer
+  scene.backgroundNode = skyGradient.mix(cloudColor, cloudMask)
 
   // Crear cámara
   camera = new THREE.PerspectiveCamera(
@@ -92,8 +124,8 @@ const init = async () => {
 
 // Configurar luces
 const setupLights = () => {
-  // Luz del sol
-  const sunLight = new THREE.DirectionalLight(0xffe499, 5)
+  // Luz del sol (atardecer)
+  const sunLight = new THREE.DirectionalLight(0xffaa66, 4)
   sunLight.castShadow = true
   sunLight.shadow.camera.near = 0.1
   sunLight.shadow.camera.far = 5
@@ -104,15 +136,15 @@ const setupLights = () => {
   sunLight.shadow.mapSize.width = 2048
   sunLight.shadow.mapSize.height = 2048
   sunLight.shadow.bias = -0.001
-  sunLight.position.set(0.5, 3, 0.5)
+  sunLight.position.set(0.5, 1.5, 0.5) // Sol más bajo (atardecer)
   scene.add(sunLight)
 
-  // Luz ambiente del agua
-  const waterAmbientLight = new THREE.HemisphereLight(0x333366, 0x74ccf4, 5)
+  // Luz ambiente cálida del atardecer
+  const waterAmbientLight = new THREE.HemisphereLight(0xff9966, 0x74ccf4, 3)
   scene.add(waterAmbientLight)
 
   // Luz ambiente del cielo
-  const skyAmbientLight = new THREE.HemisphereLight(0x74ccf4, 0, 1)
+  const skyAmbientLight = new THREE.HemisphereLight(0xff8844, 0, 1)
   scene.add(skyAmbientLight)
 }
 
@@ -128,7 +160,7 @@ const loadGLTFModel = () => {
 
         // Escalar el modelo para que se vea completo
         model.scale.set(0.1, 0.1, 0.1)
-        model.position.set(0, 0.125, 0)
+        model.position.set(0, 0.3, 0)
 
         // Habilitar sombras y ocultar el agua del modelo
         model.traverse(child => {
@@ -152,6 +184,10 @@ const loadGLTFModel = () => {
 
         scene.add(model)
         console.log('Modelo GLTF cargado:', model)
+
+        // Agregar caustics después de agregar a la escena
+        addCaustics()
+
         resolve(gltf)
       },
       xhr => {
@@ -223,6 +259,46 @@ const createWater = () => {
 
   scene.add(water)
   console.log('Agua WebGPU creada con refracción y efectos de profundidad')
+
+  // Agregar caustics si el modelo ya está cargado
+  if (model) {
+    addCaustics()
+  }
+}
+
+// Agregar caustics (reflejos de luz) a objetos bajo el agua
+const addCaustics = () => {
+  if (!model || !water) return
+
+  // Crear los nodos TSL fuera del traverse
+  const timer = time.mul(0.8)
+  const waterPosY = positionWorld.y.sub(water.position.y)
+
+  let transition = waterPosY.add(0.1).saturate().oneMinus()
+  transition = waterPosY
+    .lessThan(0)
+    .select(transition, normalWorld.y.mix(transition, 0))
+
+  const floorUV = positionWorld.xzy
+  const waterLayer0 = mx_worley_noise_float(
+    floorUV.mul(4).add(timer.mul(0.5))
+  ).mul(0.5)
+
+  // Aplicar a cada mesh del modelo
+  model.traverse(child => {
+    if (child.isMesh && child.visible && child.material) {
+      const originalColor = child.material.color || new THREE.Color(0xffffff)
+      const baseColor = color(originalColor)
+
+      // Mezclar color base con caustics
+      child.material.colorNode = transition.mix(
+        baseColor,
+        baseColor.add(waterLayer0)
+      )
+    }
+  })
+
+  console.log('✓ Caustics agregados')
 }
 
 // Crear cielo - DESHABILITADO (Sky usa ShaderMaterial incompatible con WebGPU)
@@ -257,11 +333,15 @@ const setupPostProcessing = () => {
     // Vignette effect
     const vignette = screenUV.distance(0.5).mul(1.35).clamp().oneMinus()
 
-    // Output: waterMask true = bajo el agua (azul+blur+vignette), false = arriba (normal con blur leve)
+    // Color del agua para efecto submarino
+    const waterColor = color(0x74ccf4)
+
+    // Output: cuando waterMask es ALTO (true) = imagen clara (arriba)
+    //         cuando waterMask es BAJO (false) = blur+azul+vignette (bajo el agua)
     postProcessing = new PostProcessing(renderer)
     postProcessing.outputNode = waterMask.select(
-      scenePassColorBlurred,
-      scenePassColorBlurred.mul(color(0x74ccf4)).mul(vignette)
+      scenePassColor, // waterMask alto: ARRIBA del agua (imagen clara)
+      scenePassColorBlurred.mul(waterColor).mul(vignette) // waterMask bajo: BAJO el agua
     )
 
     console.log('Post-processing configurado correctamente')
