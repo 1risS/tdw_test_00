@@ -10,17 +10,19 @@ import {
   viewportDepthTexture,
   viewportSharedTexture,
   linearDepth,
-  pass
+  pass,
+  vec2
 } from 'three/tsl'
+import { gaussianBlur } from 'three/examples/jsm/tsl/display/GaussianBlurNode.js'
 import WebGPU from 'three/addons/capabilities/WebGPU.js'
 import { WebGPURenderer, MeshBasicNodeMaterial } from 'three/webgpu'
 import { PostProcessing } from 'three/webgpu'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 
 // Variables globales
 let scene, camera, renderer, controls
-let fbxModel, water, sun, postProcessing
+let model, water, sun, postProcessing
 let clock = new THREE.Clock()
 
 // Configuración inicial
@@ -39,12 +41,12 @@ const init = async () => {
 
   // Crear cámara
   camera = new THREE.PerspectiveCamera(
-    55,
+    50,
     window.innerWidth / window.innerHeight,
-    0.1,
-    1000
+    0.25,
+    30
   )
-  camera.position.set(0, 5, 10)
+  camera.position.set(3, 2, 4)
 
   // Crear renderer WebGPU
   renderer = new WebGPURenderer({
@@ -60,15 +62,17 @@ const init = async () => {
   controls = new OrbitControls(camera, renderer.domElement)
   controls.enableDamping = true
   controls.dampingFactor = 0.05
-  controls.minDistance = 2
-  controls.maxDistance = 50
-  controls.maxPolarAngle = Math.PI / 2
+  controls.minDistance = 1
+  controls.maxDistance = 10
+  controls.maxPolarAngle = Math.PI * 0.9
+  controls.target.set(0, 0.2, 0)
+  controls.update()
 
   // Configurar iluminación
   setupLights()
 
-  // Cargar modelo FBX
-  await loadFBXModel()
+  // Cargar modelo GLTF
+  await loadGLTFModel()
 
   // Crear agua con efectos WebGPU
   createWater()
@@ -76,9 +80,8 @@ const init = async () => {
   // Cielo deshabilitado - usa fondo de gradiente WebGPU en scene.backgroundNode
   // createSky()
 
-  // Post-processing deshabilitado debido a incompatibilidad con Sky ShaderMaterial
-  // setupPostProcessing()
-  postProcessing = null
+  // Configurar post-processing para efecto submarino
+  setupPostProcessing()
 
   // Manejar redimensionamiento
   window.addEventListener('resize', onWindowResize)
@@ -113,85 +116,43 @@ const setupLights = () => {
   scene.add(skyAmbientLight)
 }
 
-// Cargar modelo FBX
-const loadFBXModel = () => {
+// Cargar modelo GLTF
+const loadGLTFModel = () => {
   return new Promise((resolve, reject) => {
-    const loader = new FBXLoader()
+    const loader = new GLTFLoader()
 
     loader.load(
-      'tdw_scene.fbx',
-      fbx => {
-        fbxModel = fbx
+      'escena.glb',
+      gltf => {
+        model = gltf.scene
 
-        // Escalar y posicionar el modelo según sea necesario
-        fbxModel.scale.set(0.01, 0.01, 0.01)
-        fbxModel.position.set(0, 0.125, 0)
+        // Escalar el modelo para que se vea completo
+        model.scale.set(0.1, 0.1, 0.1)
+        model.position.set(0, 0.125, 0)
 
-        // Habilitar sombras y ocultar el agua del FBX
-        fbxModel.traverse(child => {
+        // Habilitar sombras y ocultar el agua del modelo
+        model.traverse(child => {
           if (child.isMesh) {
             child.castShadow = true
             child.receiveShadow = true
 
-            // Convertir materiales no compatibles a MeshStandardMaterial
-            if (child.material) {
-              const materials = Array.isArray(child.material)
-                ? child.material
-                : [child.material]
-
-              const newMaterials = materials.map(material => {
-                // Si es ShaderMaterial u otro incompatible, convertir
-                if (
-                  material.type === 'ShaderMaterial' ||
-                  !material.isMeshStandardMaterial
-                ) {
-                  const newMat = new THREE.MeshStandardMaterial({
-                    color: material.color || 0xffffff,
-                    map: material.map || null,
-                    roughness: 0.8,
-                    metalness: 0.2
-                  })
-                  return newMat
-                }
-                return material
-              })
-
-              child.material = Array.isArray(child.material)
-                ? newMaterials
-                : newMaterials[0]
-
-              // Detectar y ocultar agua por color
-              const material = Array.isArray(child.material)
-                ? child.material[0]
-                : child.material
-
-              if (material.color) {
-                const color = material.color
-                const isBlue = color.b > color.r + 0.2 && color.b > 0.4
-
-                if (isBlue) {
-                  child.visible = false
-                  console.log('✓ Agua del FBX ocultada:', child.name)
-                }
-              }
-            }
-
-            // También ocultar por nombre si contiene "water", "agua", etc.
+            // Ocultar objetos que sean agua por nombre
             const name = child.name.toLowerCase()
             if (
               name.includes('water') ||
               name.includes('agua') ||
-              name.includes('ocean')
+              name.includes('ocean') ||
+              name.includes('box002') // El objeto agua del modelo anterior
             ) {
               child.visible = false
-              console.log('Agua del FBX ocultada por nombre:', child.name)
+              console.log('✓ Agua del modelo ocultada:', child.name)
             }
           }
         })
 
-        scene.add(fbxModel)
-        console.log('Modelo FBX cargado:', fbxModel)
-        resolve(fbx)
+        scene.add(model)
+        console.log('Modelo GLTF cargado:', model)
+        resolve(gltf)
       },
       xhr => {
         const percentComplete = (xhr.loaded / xhr.total) * 100
@@ -200,9 +161,9 @@ const loadFBXModel = () => {
         ).textContent = `Cargando modelo: ${Math.round(percentComplete)}%`
       },
       error => {
-        console.error('Error cargando FBX:', error)
+        console.error('Error cargando GLTF:', error)
         document.getElementById('loading').innerHTML =
-          'Error cargando el modelo FBX'
+          'Error cargando el modelo'
         reject(error)
       }
     )
@@ -235,7 +196,7 @@ const createWater = () => {
   const depthEffect = depthWater.remapClamp(-0.002, 0.04)
 
   // Configurar UV de refracción
-  const refractionUV = screenUV.add(waterIntensity.mul(0.1).toVar())
+  const refractionUV = screenUV.add(vec2(0, waterIntensity.mul(0.1)))
   const depthTestForRefraction = linearDepth(
     viewportDepthTexture(refractionUV)
   ).sub(depth)
@@ -258,7 +219,7 @@ const createWater = () => {
   waterMaterial.transparent = true
 
   water = new THREE.Mesh(waterGeometry, waterMaterial)
-  water.position.y = 0
+  water.position.y = 0.2 // Altura del agua ajustada
 
   scene.add(water)
   console.log('Agua WebGPU creada con refracción y efectos de profundidad')
@@ -276,29 +237,36 @@ const setupPostProcessing = () => {
   try {
     const scenePass = pass(scene, camera)
     const scenePassColor = scenePass.getTextureNode()
+    const scenePassDepth = scenePass.getLinearDepthNode()
 
-    // Crear máscara de agua basada en profundidad
-    const scenePassDepth = scenePass.getLinearDepthNode().remapClamp(0.15, 0.3)
-
+    // Máscara de agua: detecta si la cámara está bajo el agua
     const waterMask = screenUV
       .distance(0.5)
+      .mul(1.35)
+      .clamp()
       .oneMinus()
-      .mul(3)
-      .saturate()
-      .mul(scenePassDepth.oneMinus())
+      .mul(scenePassDepth.mul(camera.near))
 
-    const waterColor = color(0x0487e2).mul(waterMask)
+    // Blur con intensidad variable según profundidad
+    const scenePassColorBlurred = gaussianBlur(scenePassColor)
+    scenePassColorBlurred.directionNode = waterMask.select(
+      scenePassDepth,
+      scenePassDepth.mul(5)
+    )
 
-    // Aplicar color del agua con vignette
-    const waterColorPass = scenePassColor
-      .mul(waterMask.oneMinus())
-      .add(waterColor)
+    // Vignette effect
+    const vignette = screenUV.distance(0.5).mul(1.35).clamp().oneMinus()
 
+    // Output: waterMask true = bajo el agua (azul+blur+vignette), false = arriba (normal con blur leve)
     postProcessing = new PostProcessing(renderer)
-    postProcessing.outputNode = waterColorPass
+    postProcessing.outputNode = waterMask.select(
+      scenePassColorBlurred,
+      scenePassColorBlurred.mul(color(0x74ccf4)).mul(vignette)
+    )
+
+    console.log('Post-processing configurado correctamente')
   } catch (error) {
-    console.warn('Error configurando post-processing:', error)
-    // Deshabilitar post-processing si falla
+    console.error('Error configurando post-processing:', error)
     postProcessing = null
   }
 }
@@ -315,8 +283,12 @@ const animate = () => {
   // Actualizar controles
   controls.update()
 
-  // Renderizar escena directamente (post-processing deshabilitado)
-  renderer.render(scene, camera)
+  // Renderizar con post-processing o directamente
+  if (postProcessing) {
+    postProcessing.render()
+  } else {
+    renderer.render(scene, camera)
+  }
 }
 
 // Inicializar aplicación
