@@ -12,7 +12,8 @@ import {
   linearDepth,
   pass,
   vec2,
-  vec3
+  vec3,
+  uniform
 } from 'three/tsl'
 import { gaussianBlur } from 'three/examples/jsm/tsl/display/GaussianBlurNode.js'
 import WebGPU from 'three/addons/capabilities/WebGPU.js'
@@ -25,6 +26,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 let scene, camera, renderer, controls
 let model, water, sun, postProcessing
 let clock = new THREE.Clock()
+let cameraYUniform, waterHeightUniform // Uniforms para detectar posición bajo el agua
 
 // Configuración inicial
 const init = async () => {
@@ -315,33 +317,27 @@ const setupPostProcessing = () => {
     const scenePassColor = scenePass.getTextureNode()
     const scenePassDepth = scenePass.getLinearDepthNode()
 
-    // Máscara de agua: detecta si la cámara está bajo el agua
-    const waterMask = screenUV
-      .distance(0.5)
-      .mul(1.35)
-      .clamp()
-      .oneMinus()
-      .mul(scenePassDepth.mul(camera.near))
+    // Crear uniforms que detectan si la cámara está bajo el agua
+    // Comparando posición Y de la cámara con la altura del agua (0.2)
+    cameraYUniform = uniform(camera.position.y)
+    waterHeightUniform = uniform(water.position.y)
+    const isUnderwater = cameraYUniform.lessThan(waterHeightUniform)
 
-    // Blur con intensidad variable según profundidad
+    // Máscara radial para el vignette (solo cuando está sumergido)
+    const radialMask = screenUV.distance(0.5).mul(1.35).clamp().oneMinus()
+
+    // Blur con intensidad variable
     const scenePassColorBlurred = gaussianBlur(scenePassColor)
-    scenePassColorBlurred.directionNode = waterMask.select(
-      scenePassDepth,
-      scenePassDepth.mul(5)
-    )
-
-    // Vignette effect
-    const vignette = screenUV.distance(0.5).mul(1.35).clamp().oneMinus()
+    scenePassColorBlurred.directionNode = scenePassDepth.mul(5)
 
     // Color del agua para efecto submarino
     const waterColor = color(0x74ccf4)
 
-    // Output: cuando waterMask es ALTO (true) = imagen clara (arriba)
-    //         cuando waterMask es BAJO (false) = blur+azul+vignette (bajo el agua)
+    // Output: si cámara Y < agua Y → blur+azul+vignette, sino → imagen clara
     postProcessing = new PostProcessing(renderer)
-    postProcessing.outputNode = waterMask.select(
-      scenePassColor, // waterMask alto: ARRIBA del agua (imagen clara)
-      scenePassColorBlurred.mul(waterColor).mul(vignette) // waterMask bajo: BAJO el agua
+    postProcessing.outputNode = isUnderwater.select(
+      scenePassColorBlurred.mul(waterColor).mul(radialMask), // Bajo el agua
+      scenePassColor // Arriba del agua (imagen clara)
     )
 
     console.log('Post-processing configurado correctamente')
@@ -362,6 +358,11 @@ const onWindowResize = () => {
 const animate = () => {
   // Actualizar controles
   controls.update()
+
+  // Actualizar uniform de posición de cámara para detección bajo el agua
+  if (cameraYUniform && camera) {
+    cameraYUniform.value = camera.position.y
+  }
 
   // Renderizar con post-processing o directamente
   if (postProcessing) {
